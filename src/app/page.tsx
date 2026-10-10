@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Navbar from "@/components/Navbar";
 import type { Tab } from "@/components/Navbar";
 import Footer from "@/components/Footer";
@@ -11,9 +11,14 @@ import SpendingChart from "@/components/SpendingChart";
 import RecentTransactions from "@/components/RecentTransactions";
 import AddTransactionModal from "@/components/AddTransactionModal";
 import type { Transaction } from "@/components/AddTransactionModal";
+import {
+  CategorySpendingChart,
+  MonthlyComparison,
+} from "@/components/FinanceInsights";
 
 const STORAGE_KEY = "paisa-tracker-x-transactions";
 const BUDGET_KEY = "paisa-tracker-x-budget";
+const BACKUP_VERSION = 1;
 
 function money(value: number) {
   return new Intl.NumberFormat("en-IN", {
@@ -24,14 +29,32 @@ function money(value: number) {
 }
 
 function todayString() {
-  const d = new Date();
-  return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+  const date = new Date();
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
     .toISOString()
     .slice(0, 10);
 }
 
 function monthKey(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function isValidTransaction(item: unknown): item is Transaction {
+  if (!item || typeof item !== "object") return false;
+
+  const value = item as Record<string, unknown>;
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.amount === "number" &&
+    Number.isFinite(value.amount) &&
+    value.amount >= 0 &&
+    (value.type === "income" || value.type === "expense") &&
+    typeof value.category === "string" &&
+    typeof value.date === "string" &&
+    /^\d{4}-\d{2}-\d{2}$/.test(value.date)
+  );
 }
 
 export default function Home() {
@@ -44,26 +67,16 @@ export default function Home() {
   const [editing, setEditing] = useState<Transaction | null>(null);
   const [search, setSearch] = useState("");
   const [message, setMessage] = useState("");
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
+
       if (saved) {
         const parsed: unknown = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          setTransactions(
-            parsed.filter(
-              (item): item is Transaction =>
-                item &&
-                typeof item.id === "string" &&
-                typeof item.title === "string" &&
-                typeof item.amount === "number" &&
-                Number.isFinite(item.amount) &&
-                (item.type === "income" || item.type === "expense") &&
-                typeof item.category === "string" &&
-                typeof item.date === "string"
-            )
-          );
+          setTransactions(parsed.filter(isValidTransaction));
         }
       }
 
@@ -80,6 +93,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!loaded) return;
+
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(transactions));
       localStorage.setItem(BUDGET_KEY, String(budget));
@@ -91,6 +105,7 @@ export default function Home() {
   useEffect(() => {
     const update = () => setNow(new Date());
     update();
+
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);
   }, []);
@@ -112,15 +127,25 @@ export default function Home() {
     .reduce((sum, item) => sum + item.amount, 0);
 
   const balance = transactions.reduce(
-    (sum, item) => sum + (item.type === "income" ? item.amount : -item.amount),
+    (sum, item) =>
+      sum + (item.type === "income" ? item.amount : -item.amount),
     0
   );
 
+  const budgetPercent = budget > 0 ? (expenses / budget) * 100 : 0;
+  const budgetWarning =
+    budget > 0 && budgetPercent >= 100
+      ? "Budget exceeded! Review your spending."
+      : budget > 0 && budgetPercent >= 80
+        ? "You have used 80% or more of your monthly budget."
+        : "";
+
   const recentTransactions = [...transactions]
-    .filter((item) => item.title.toLowerCase().includes(search.trim().toLowerCase()))
+    .filter((item) =>
+      item.title.toLowerCase().includes(search.trim().toLowerCase())
+    )
     .sort(
-      (a, b) =>
-        b.date.localeCompare(a.date) || b.id.localeCompare(a.id)
+      (a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)
     )
     .slice(0, 5);
 
@@ -128,16 +153,25 @@ export default function Home() {
     const date = new Date();
     date.setDate(1);
     date.setMonth(date.getMonth() - (5 - index));
-    const key = monthKey(date);
 
-    const total = transactions
-      .filter((item) => item.type === "expense" && item.date.startsWith(key))
-      .reduce((sum, item) => sum + item.amount, 0);
+    const key = monthKey(date);
+    const monthItems = transactions.filter((item) => item.date.startsWith(key));
 
     return {
       key,
-      label: date.toLocaleDateString("en-IN", { month: "short" }),
-      total,
+      label: date.toLocaleDateString("en-IN", {
+        month: "short",
+        year: "2-digit",
+      }),
+      total: monthItems
+        .filter((item) => item.type === "expense")
+        .reduce((sum, item) => sum + item.amount, 0),
+      income: monthItems
+        .filter((item) => item.type === "income")
+        .reduce((sum, item) => sum + item.amount, 0),
+      expenses: monthItems
+        .filter((item) => item.type === "expense")
+        .reduce((sum, item) => sum + item.amount, 0),
     };
   });
 
@@ -189,6 +223,7 @@ export default function Home() {
     if (input === null || input.trim() === "") return;
 
     const value = Number(input);
+
     if (!Number.isFinite(value) || value < 0) {
       window.alert("Valid budget amount enter karo.");
       return;
@@ -196,6 +231,15 @@ export default function Home() {
 
     setBudget(value);
     setMessage("Monthly budget updated.");
+  }
+
+  function downloadFile(content: string, filename: string, type: string) {
+    const url = URL.createObjectURL(new Blob([content], { type }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   function exportCSV() {
@@ -216,23 +260,85 @@ export default function Home() {
       )
       .join("\r\n");
 
-    const url = URL.createObjectURL(
-      new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" })
+    downloadFile(
+      "\uFEFF" + csv,
+      `paisa-tracker-${today}.csv`,
+      "text/csv;charset=utf-8;"
     );
+    setMessage("CSV export ready.");
+  }
 
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `paisa-tracker-${today}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+  function backupData() {
+    const backup = {
+      app: "Paisa Tracker X",
+      version: BACKUP_VERSION,
+      exportedAt: new Date().toISOString(),
+      budget,
+      transactions,
+    };
+
+    downloadFile(
+      JSON.stringify(backup, null, 2),
+      `paisa-tracker-backup-${today}.json`,
+      "application/json"
+    );
+    setMessage("Backup downloaded successfully.");
+  }
+
+  async function restoreData(file?: File) {
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const parsed: unknown = JSON.parse(text);
+
+      if (!parsed || typeof parsed !== "object") {
+        throw new Error("Invalid backup file.");
+      }
+
+      const backup = parsed as Record<string, unknown>;
+
+      if (
+        backup.app !== "Paisa Tracker X" ||
+        backup.version !== BACKUP_VERSION ||
+        !Array.isArray(backup.transactions) ||
+        typeof backup.budget !== "number" ||
+        !Number.isFinite(backup.budget) ||
+        backup.budget < 0 ||
+        !backup.transactions.every(isValidTransaction)
+      ) {
+        throw new Error("Backup format is not supported or is invalid.");
+      }
+
+      const confirmed = window.confirm(
+        "Restore this backup? Current transactions and budget will be replaced."
+      );
+
+      if (!confirmed) return;
+
+      setTransactions(backup.transactions);
+      setBudget(backup.budget);
+      setMessage("Backup restored successfully.");
+      setActiveTab("home");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? `Restore failed: ${error.message}`
+          : "Restore failed. Check your backup file."
+      );
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
   }
 
   if (!loaded) {
     return (
-      <main className="flex min-h-dvh items-center justify-center bg-[#F8F9FF]">
+      <main className="flex h-dvh items-center justify-center bg-[#F8F9FF]">
         <div className="text-center">
-          <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-4 border-[#DBDBDB] border-t-[#9B66FF]" />
-          <p className="font-bold text-[#454D5E]">Loading Paisa Tracker X...</p>
+          <div className="mx-auto mb-3 h-9 w-9 animate-spin rounded-full border-4 border-[#DBDBDB] border-t-[#9B66FF]" />
+          <p className="text-sm font-bold text-[#454D5E]">
+            Loading Paisa Tracker X...
+          </p>
         </div>
       </main>
     );
@@ -247,15 +353,14 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-dvh bg-[#F8F9FF] text-[#212121]">
+    <div className="flex h-dvh flex-col overflow-hidden bg-[#F8F9FF] text-[#212121] lg:flex-row">
       <Navbar activeTab={activeTab} onNavigate={navigate} />
 
-      <main className="min-h-dvh px-4 pb-24 pt-5 sm:px-6 sm:pb-8 lg:ml-60 lg:px-8 lg:pt-7">
+      <main className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-20 pt-3 sm:px-5 sm:pb-5 sm:pt-4 lg:px-6 lg:pb-5 lg:pt-5">
         <div className="mx-auto w-full max-w-7xl">
-          {/* Top header */}
-          <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.15em] text-[#9B66FF]">
+          <header className="mb-3 flex items-center justify-between gap-3 sm:mb-4">
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-[0.12em] text-[#9B66FF] sm:text-xs">
                 {now
                   ? now.toLocaleDateString("en-IN", {
                       weekday: "short",
@@ -265,11 +370,13 @@ export default function Home() {
                     })
                   : today}
               </p>
-              <h1 className="mt-1 text-2xl font-extrabold tracking-tight sm:text-3xl">
+
+              <h1 className="mt-0.5 text-xl font-extrabold tracking-tight sm:text-2xl lg:text-3xl">
                 {heading[activeTab]}
                 {activeTab === "home" && " 👋"}
               </h1>
-              <p className="mt-1 text-sm text-[#666666]">
+
+              <p className="mt-0.5 text-xs text-[#666666] sm:text-sm">
                 {now
                   ? now.toLocaleTimeString("en-IN", {
                       hour: "2-digit",
@@ -284,35 +391,40 @@ export default function Home() {
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              <span className="hidden rounded-full bg-[#EEE5FF] px-4 py-2 text-xs font-bold text-[#7538E8] sm:inline-flex">
-                👑 Personal Finance
-              </span>
-              <button
-                onClick={() => {
-                  setActiveTab("home");
-                  setMessage("");
-                  const input = window.prompt("Search transactions by description");
-                  if (input !== null) setSearch(input);
-                }}
-                aria-label="Search transactions"
-                className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#EAE7F3] bg-white text-xl hover:bg-[#EEE5FF]"
-              >
-                ⌕
-              </button>
-            </div>
+            <button
+              onClick={() => {
+                setActiveTab("home");
+                const input = window.prompt(
+                  "Search transactions by description"
+                );
+                if (input !== null) setSearch(input);
+              }}
+              aria-label="Search transactions"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#EAE7F3] bg-white text-xl hover:bg-[#EEE5FF]"
+            >
+              ⌕
+            </button>
           </header>
 
           {message && (
-            <div className="mb-5 flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-800">
-              <span>{message}</span>
-              <button onClick={() => setMessage("")} aria-label="Dismiss">×</button>
+            <div
+              role="status"
+              className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-800 sm:text-sm"
+            >
+              <span className="break-words">{message}</span>
+              <button
+                onClick={() => setMessage("")}
+                aria-label="Dismiss"
+                className="shrink-0 text-lg"
+              >
+                ×
+              </button>
             </div>
           )}
 
           {activeTab === "home" && (
-            <>
-              <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div className="space-y-3 sm:space-y-4">
+              <section className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:gap-4">
                 <SummaryCard
                   title="Total balance"
                   amount={money(balance)}
@@ -336,52 +448,71 @@ export default function Home() {
                 />
               </section>
 
-              <div className="mt-5">
-                <BudgetCard
-                  budget={budget}
-                  spent={expenses}
-                  onEdit={editBudget}
-                />
-              </div>
+              {budgetWarning && (
+                <section
+                  role="alert"
+                  className={`rounded-xl border p-3 text-sm font-semibold ${
+                    budgetPercent >= 100
+                      ? "border-rose-200 bg-rose-50 text-rose-700"
+                      : "border-amber-200 bg-amber-50 text-amber-800"
+                  }`}
+                >
+                  <p>{budgetWarning}</p>
+                  <p className="mt-1 text-xs font-medium">
+                    {money(expenses)} spent out of {money(budget)} (
+                    {budgetPercent.toFixed(1)}%).
+                  </p>
+                </section>
+              )}
 
-              <div className="mt-5 grid grid-cols-1 gap-5 xl:grid-cols-5">
-                <div className="xl:col-span-3">
+              <BudgetCard
+                budget={budget}
+                spent={expenses}
+                onEdit={editBudget}
+              />
+
+              <div className="grid grid-cols-1 gap-3 sm:gap-4 xl:grid-cols-5">
+                <div className="min-w-0 xl:col-span-3">
                   <SpendingChart months={chartMonths} total={expenses} />
                 </div>
-                <div className="xl:col-span-2">
-                  <section className="h-full rounded-3xl border border-[#EAE7F3] bg-white p-5 shadow-sm sm:p-6">
-                    <h2 className="font-extrabold">Money snapshot</h2>
-                    <p className="mt-1 text-xs text-[#878787]">This month at a glance</p>
 
-                    <div className="mt-5 space-y-3">
-                      <div className="flex items-center gap-3 rounded-2xl bg-[#E7F5FF] p-4">
-                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#2EA1FF] text-xl text-white">↑</span>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs text-[#666666]">Income received</p>
-                          <p className="mt-1 break-words font-extrabold">{money(income)}</p>
-                        </div>
+                <div className="min-w-0 xl:col-span-2">
+                  <section className="h-full rounded-2xl border border-[#EAE7F3] bg-white p-4 shadow-sm sm:rounded-3xl sm:p-5">
+                    <h2 className="text-sm font-extrabold sm:text-base">
+                      Money snapshot
+                    </h2>
+                    <p className="mt-1 text-xs text-[#878787]">
+                      This month at a glance
+                    </p>
+
+                    <div className="mt-3 space-y-2">
+                      <div className="rounded-xl bg-[#E7F5FF] p-3">
+                        <p className="text-xs text-[#666666]">
+                          Income received
+                        </p>
+                        <p className="mt-1 break-words text-sm font-extrabold">
+                          {money(income)}
+                        </p>
                       </div>
 
-                      <div className="flex items-center gap-3 rounded-2xl bg-[#F2EAFE] p-4">
-                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#9B66FF] text-xl text-white">↓</span>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs text-[#666666]">Expenses paid</p>
-                          <p className="mt-1 break-words font-extrabold">{money(expenses)}</p>
-                        </div>
+                      <div className="rounded-xl bg-[#F2EAFE] p-3">
+                        <p className="text-xs text-[#666666]">Expenses paid</p>
+                        <p className="mt-1 break-words text-sm font-extrabold">
+                          {money(expenses)}
+                        </p>
                       </div>
 
-                      <div className="flex items-center gap-3 rounded-2xl bg-[#FFF8CF] p-4">
-                        <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#FFE51F] text-xl">◎</span>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs text-[#666666]">Budget left</p>
-                          <p className="mt-1 break-words font-extrabold">{money(Math.max(0, budget - expenses))}</p>
-                        </div>
+                      <div className="rounded-xl bg-[#FFF8CF] p-3">
+                        <p className="text-xs text-[#666666]">Budget left</p>
+                        <p className="mt-1 break-words text-sm font-extrabold">
+                          {money(Math.max(0, budget - expenses))}
+                        </p>
                       </div>
                     </div>
 
                     <button
                       onClick={openAdd}
-                      className="mt-5 w-full rounded-xl bg-gradient-to-r from-[#9B66FF] to-[#1162F2] px-4 py-3 text-sm font-extrabold text-white"
+                      className="mt-3 min-h-10 w-full rounded-xl bg-gradient-to-r from-[#9B66FF] to-[#1162F2] px-3 py-2.5 text-sm font-extrabold text-white hover:opacity-90"
                     >
                       + Add a transaction
                     </button>
@@ -389,40 +520,55 @@ export default function Home() {
                 </div>
               </div>
 
-              <div className="mt-5">
-                <RecentTransactions
-                  transactions={recentTransactions}
-                  onAdd={openAdd}
-                  onEdit={editTransaction}
-                  onDelete={deleteTransaction}
-                />
-              </div>
-            </>
+              <CategorySpendingChart transactions={monthTransactions} />
+
+              <RecentTransactions
+                transactions={recentTransactions}
+                onAdd={openAdd}
+                onEdit={editTransaction}
+                onDelete={deleteTransaction}
+              />
+            </div>
           )}
 
           {activeTab === "budget" && (
-            <div className="space-y-5">
-              <BudgetCard budget={budget} spent={expenses} onEdit={editBudget} />
+            <div className="space-y-3 sm:space-y-4">
+              {budgetWarning && (
+                <div
+                  role="alert"
+                  className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800"
+                >
+                  {budgetWarning}
+                </div>
+              )}
 
-              <section className="rounded-3xl border border-[#EAE7F3] bg-white p-5 sm:p-6">
-                <h2 className="text-lg font-extrabold">Budget guide</h2>
+              <BudgetCard
+                budget={budget}
+                spent={expenses}
+                onEdit={editBudget}
+              />
+
+              <section className="rounded-2xl border border-[#EAE7F3] bg-white p-4 sm:rounded-3xl sm:p-5">
+                <h2 className="font-extrabold">Budget guide</h2>
                 <p className="mt-2 text-sm leading-6 text-[#666666]">
-                  Set a realistic monthly spending limit. Your budget progress
-                  updates automatically when you add or delete an expense.
+                  Your monthly spending limit is compared against expenses
+                  recorded in the current month. Alerts appear at 80% and 100%.
                 </p>
                 <button
                   onClick={editBudget}
-                  className="mt-4 rounded-xl bg-[#9B66FF] px-5 py-3 text-sm font-bold text-white"
+                  className="mt-3 min-h-10 rounded-xl bg-[#9B66FF] px-4 py-2.5 text-sm font-bold text-white"
                 >
                   Edit monthly budget
                 </button>
               </section>
+
+              <CategorySpendingChart transactions={monthTransactions} />
             </div>
           )}
 
           {activeTab === "reports" && (
-            <div className="space-y-5">
-              <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="space-y-3 sm:space-y-4">
+              <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4">
                 <SummaryCard
                   title="Income this month"
                   amount={money(income)}
@@ -441,22 +587,36 @@ export default function Home() {
 
               <SpendingChart months={chartMonths} total={expenses} />
 
-              <section className="rounded-3xl border border-[#EAE7F3] bg-white p-5 sm:p-6">
+              <CategorySpendingChart transactions={monthTransactions} />
+
+              <MonthlyComparison
+                months={chartMonths.map((month) => ({
+                  label: month.label,
+                  income: month.income,
+                  expenses: month.expenses,
+                }))}
+              />
+
+              <section className="rounded-2xl border border-[#EAE7F3] bg-white p-4 sm:rounded-3xl sm:p-5">
                 <h2 className="font-extrabold">All transactions</h2>
                 <p className="mt-1 text-xs text-[#878787]">
                   {transactions.length} records saved
                 </p>
-                <div className="mt-4">
+
+                <div className="mt-3">
                   <RecentTransactions
-                    transactions={[...transactions].sort((a, b) => b.date.localeCompare(a.date))}
+                    transactions={[...transactions].sort((a, b) =>
+                      b.date.localeCompare(a.date)
+                    )}
                     onAdd={openAdd}
                     onEdit={editTransaction}
                     onDelete={deleteTransaction}
                   />
                 </div>
+
                 <button
                   onClick={exportCSV}
-                  className="mt-4 min-h-11 w-full rounded-xl border border-[#DBDBDB] font-bold hover:bg-[#F8F9FF]"
+                  className="mt-3 min-h-11 w-full rounded-xl border border-[#DBDBDB] text-sm font-bold hover:bg-[#F8F9FF]"
                 >
                   ↓ Export transactions as CSV
                 </button>
@@ -465,34 +625,80 @@ export default function Home() {
           )}
 
           {activeTab === "settings" && (
-            <div className="space-y-5">
-              <section className="rounded-3xl border border-[#EAE7F3] bg-white p-6">
-                <div className="flex items-center gap-4">
-                  <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#FFF3A6] text-3xl">🪙</span>
+            <div className="space-y-3 sm:space-y-4">
+              <section className="rounded-2xl border border-[#EAE7F3] bg-white p-4 sm:rounded-3xl sm:p-5">
+                <div className="flex items-center gap-3">
+                  <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[#FFF3A6] text-2xl">
+                    🪙
+                  </span>
                   <div>
-                    <h2 className="text-lg font-extrabold">
-                      Paisa Tracker <span className="text-[#9B66FF]">X</span>
+                    <h2 className="font-extrabold">
+                      Paisa Tracker{" "}
+                      <span className="text-[#9B66FF]">X</span>
                     </h2>
-                    <p className="mt-1 text-sm text-[#878787]">Track Smart. Spend Better.</p>
+                    <p className="mt-1 text-sm text-[#878787]">
+                      Track Smart. Spend Better.
+                    </p>
                   </div>
                 </div>
               </section>
 
-              <section className="rounded-3xl border border-[#EAE7F3] bg-white p-5">
+              <section className="rounded-2xl border border-[#EAE7F3] bg-white p-4 sm:rounded-3xl sm:p-5">
+                <h2 className="font-extrabold">Backup & restore</h2>
+                <p className="mt-2 text-sm leading-6 text-[#666666]">
+                  Download a JSON backup containing your transactions and
+                  monthly budget. Restore a backup to replace the data currently
+                  saved in this browser.
+                </p>
+
+                <button
+                  onClick={backupData}
+                  className="mt-4 min-h-11 w-full rounded-xl bg-gradient-to-r from-[#9B66FF] to-[#1162F2] px-4 py-3 text-sm font-bold text-white hover:opacity-90"
+                >
+                  ↓ Download JSON backup
+                </button>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="sr-only"
+                  aria-label="Choose a Paisa Tracker X backup file"
+                  onChange={(event) => {
+                    void restoreData(event.target.files?.[0]);
+                  }}
+                />
+
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="mt-3 min-h-11 w-full rounded-xl border border-[#DBDBDB] px-4 py-3 text-sm font-bold hover:bg-[#F8F9FF]"
+                >
+                  ↑ Restore from JSON backup
+                </button>
+
+                <p className="mt-3 text-xs leading-5 text-[#777777]">
+                  Restoring replaces the existing transactions and budget.
+                  Always download a backup before restoring another file.
+                </p>
+              </section>
+
+              <section className="rounded-2xl border border-[#EAE7F3] bg-white p-4 sm:rounded-3xl sm:p-5">
                 <h2 className="font-extrabold">Data & budget</h2>
                 <p className="mt-2 text-sm leading-6 text-[#666666]">
-                  Your transactions are stored locally in this browser. They
-                  are not synced to a cloud account.
+                  Your data is stored in this browser only. JSON backup helps
+                  you move it manually to another browser or device.
                 </p>
+
                 <button
                   onClick={exportCSV}
-                  className="mt-4 min-h-11 w-full rounded-xl border border-[#DBDBDB] font-bold hover:bg-[#F8F9FF]"
+                  className="mt-3 min-h-11 w-full rounded-xl border border-[#DBDBDB] text-sm font-bold hover:bg-[#F8F9FF]"
                 >
-                  ↓ Export transactions
+                  ↓ Export transactions as CSV
                 </button>
+
                 <button
                   onClick={editBudget}
-                  className="mt-3 min-h-11 w-full rounded-xl bg-[#EEE5FF] font-bold text-[#7538E8]"
+                  className="mt-3 min-h-11 w-full rounded-xl bg-[#EEE5FF] text-sm font-bold text-[#7538E8]"
                 >
                   Edit monthly budget
                 </button>
@@ -500,7 +706,9 @@ export default function Home() {
             </div>
           )}
 
-          <Footer />
+          <div className="mt-4">
+            <Footer />
+          </div>
         </div>
       </main>
 
