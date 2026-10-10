@@ -1,14 +1,7 @@
 
 "use client";
 
-type Transaction = {
-  id: string;
-  title: string;
-  amount: number;
-  type: "income" | "expense";
-  category: string;
-  date: string;
-};
+import type { Transaction } from "@/components/AddTransactionModal";
 
 type Props = {
   transactions: Transaction[];
@@ -71,16 +64,10 @@ export default function RecentTransactions({
   onEdit,
   onDelete,
 }: Props) {
-  // Copy the array before sorting so the parent's state is not mutated.
-  const sortedTransactions = [...transactions].sort((a, b) => {
-    const dateDifference = b.date.localeCompare(a.date);
-
-    if (dateDifference !== 0) {
-      return dateDifference;
-    }
-
-    return b.id.localeCompare(a.id);
-  });
+  const sortedTransactions = [...transactions].sort(
+    (a, b) =>
+      b.date.localeCompare(a.date) || b.id.localeCompare(a.id)
+  );
 
   function handleDelete(item: Transaction) {
     const confirmed = window.confirm(
@@ -117,7 +104,9 @@ export default function RecentTransactions({
           onClick={onAdd}
           className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#EEE5FF] px-3 py-2 text-xs font-extrabold text-[#7538E8] transition hover:bg-[#E4D5FF] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#9B66FF] sm:text-sm"
         >
-          <span aria-hidden="true" className="text-base">+</span>
+          <span aria-hidden="true" className="text-base">
+            +
+          </span>
           Add new
         </button>
       </div>
@@ -160,9 +149,7 @@ export default function RecentTransactions({
                 <span
                   aria-hidden="true"
                   className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-lg sm:h-12 sm:w-12 sm:text-xl ${
-                    isIncome
-                      ? "bg-[#E7F8EF]"
-                      : "bg-[#F0E8FF]"
+                    isIncome ? "bg-[#E7F8EF]" : "bg-[#F0E8FF]"
                   }`}
                 >
                   {icons[item.category] ?? "📌"}
